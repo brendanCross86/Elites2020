@@ -1,0 +1,8 @@
+So we need a tweet file (id, timestamp, uid), 
+retweet file (tweet id, retweet id, retweet uid), 
+quote file (tweet id, quote id, quote uid), 
+replied file (tweet id, replied id, replied uid), 
+mentioned file (tweet id, mentioned uid), 
+hashtag file (tweet id, hashtag), 
+user file (uid, creation of uid), 
+classification file (tweet id, stance).

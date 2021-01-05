@@ -1,0 +1,35 @@
+(venv) crossb@ganxis3:~/research/elites_2020/information_diffusion-master$ python elites_2020_retweet_test.py
+/home/crossb/multiscale_validation/src/venv/lib/python3.6/site-packages/graph_tool/draw/cairo_draw.py:32: RuntimeWarning: Error importing cairo. Graph drawing will not work.
+  warnings.warn(msg, RuntimeWarning)
+/home/crossb/multiscale_validation/src/venv/lib/python3.6/site-packages/graph_tool/draw/cairo_draw.py:32: RuntimeWarning: Error importing cairo. Graph drawing will not work.
+  warnings.warn(msg, RuntimeWarning)
+/home/crossb/multiscale_validation/src/venv/lib/python3.6/site-packages/graph_tool/draw/cairo_draw.py:32: RuntimeWarning: Error importing cairo. Graph drawing will not work.
+  warnings.warn(msg, RuntimeWarning)
+/home/crossb/multiscale_validation/src/venv/lib/python3.6/site-packages/graph_tool/all.py:39: RuntimeWarning: Error importing draw module, proceeding nevertheless: No module named 'cairo'
+  warnings.warn(msg, RuntimeWarning)
+pid 92208's current affinity mask: ffffffffffffffffffffffffffffffff
+pid 92208's new affinity mask: ff
+/home/pub/hernan/Election_2016/complete_trump_vs_hillary_db.sqlite
+164.66703391075134
+164.66727590560913
+/home/pub/hernan/Election_2016/complete_trump_vs_hillary_sep-nov_db.sqlite
+409.91350865364075
+409.9136118888855
+complete
+june-nov
+116762970
+100.64868903160095
+103.01883172988892
+saving graph to
+data/test2016/retweet_graph__complete_june-nov.gt
+148.9011034965515
+simple
+june-nov
+116762970
+16736.10447692871
+16736.261838436127
+saving graph to
+data/test2016/retweet_graph__simple_june-nov.gt
+16756.480241537094
+total time
+17193.650650024414
