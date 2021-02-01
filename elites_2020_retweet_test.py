@@ -21,16 +21,17 @@ import collections
 import dask.dataframe as dd
 import dask
 from dask.distributed import Client, LocalCluster, progress
-
+from multiprocessing.pool import ThreadPool
+from dask.diagnostics import ProgressBar
+#dask.config.set(scheduler='processes')
 # number of workers
 NUM_WORKERS = 32
+#dask.config.set(scheduler='processes', pool=ThreadPool(NUM_WORKERS))
 
 save_dir = 'data/test2020'
 
-#raise Exception
 
-#%% load user and tweet list
-Election_2020_dir = '/home/pub/hernan/Election_2020/joined_output'
+Election_2020_dir = '/home/pub/hernan/Election_2020/joined_output_v2'
 CLASSIFIED_URLS_DIR = '/home/pub/hernan/Election_2020/classified_links'
 URLS_DIR = os.path.join(Election_2020_dir, 'urls')
 WORKING_DIR = '/home/crossb/working'
@@ -46,7 +47,7 @@ edges_db_file = dict()
 
 RETWEET_DIR_TO_COLUMNS = {
     os.path.join(Election_2020_dir, 'user_mentions'): ['id', 'user_id'],
-    os.path.join(Election_2020_dir, 'retweets'): ['id', 'user_id', 'retweet_id'],
+    os.path.join(Election_2020_dir, 'retweets'): ['id', 'user_id'],#, 'retweet_id'],
     os.path.join(Election_2020_dir, 'replies'): ['id', 'in_reply_to_user_id', 'in_reply_to_status_id'],
     os.path.join(Election_2020_dir, 'quotes'): ['id', 'user_id', 'quoted_id']
 }
@@ -67,7 +68,7 @@ os.environ['SQLITE_TMPDIR'] = '/home/crossb'
 # TODO: Break  load tweets into two portions, one where we load from raw and filter out by date, then save
 #  and a second where we load the date filtered data and remove duplicates (since removing duplicates seems to
 #  cause a host of issues as the amount of data increases)
-def dask_load_tweets(data_dir):
+def dask_load_tweets(tweet_dir):
     """
 
     :param data_dir:
@@ -77,64 +78,129 @@ def dask_load_tweets(data_dir):
 
     # check the working directory for a copy of the data and load that instead
     #if os.path.isfile(os.path.join(WORKING_DIR, 'intermediaries', 'date_filtered_tweets.csv')):
-    try:
-        print("LOADING WORKING TWEET DATA")
-        files = os.path.join(WORKING_DIR, 'intermediaries', 'tweets_less_duplicates_*.csv')
-        tweet_data = dd.read_csv(files, delimiter=',',
-                    usecols=['id', 'timestamp', 'auth_id'], parse_dates=['timestamp'],
-                    dtype={'id': np.int64, 'timestamp': str, 'auth_id': np.int64})
+    #try:
+    #    print("LOADING WORKING TWEET DATA")
+    #    files = os.path.join(WORKING_DIR, 'intermediaries', 'tweets_less_duplicates_*.csv')
+    #    tweet_data = dd.read_csv(files, delimiter=',',
+    #                usecols=['id', 'timestamp', 'auth_id'], parse_dates=['timestamp'],
+    #                dtype={'id': np.int64, 'timestamp': str, 'auth_id': np.int64})
+#
+    #except OSError as e:
+    print("No working set of tweets found, filtering from raw data. Directory:", tweet_dir)
+    tweet_data = dd.read_csv(os.path.join(tweet_dir, '*.csv'), delimiter=',',
+                             dtype={'id': np.int64, 'created_at': str, 'user_id': np.int64, 'p': np.float64}
+                             ).rename(columns={'user_id': 'auth_id', 'created_at': 'timestamp'})
 
-    except OSError as e:
-        print("No working set of tweets found, filtering from raw data.")
-        tweet_dir = os.path.join(data_dir, 'tweets')
-        #tweet_data = dd.read_csv(os.path.join(tweet_dir, '*.csv'), delimiter=',',
-        tweet_data = dd.read_csv(os.path.join(tweet_dir, '202011_tweets.csv'), delimiter=',',
-                                 dtype={'id': str, 'created_at': str, 'user_id': str}
-                                 ).rename(columns={'user_id': 'auth_id', 'created_at': 'timestamp'})
+    tweet_data = tweet_data[tweet_data['id'] != 'id']
+    tweet_data['timestamp'] = dd.to_datetime(tweet_data['timestamp'], format='%Y-%m-%d %H:%M:%S')
 
-        tweet_data = tweet_data[tweet_data['id'] != 'id']# %H:%M:%S')
-        to_date = lambda df: df['timestamp'].str.slice(stop=10)
-        tweet_data['timestamp'] = tweet_data.map_partitions(to_date)
-        tweet_data['timestamp'] = dd.to_datetime(tweet_data['timestamp'], format='%Y-%m-%d')
+    filter_dates = lambda df: df[(df['timestamp'] > start_date) & (df['timestamp'] < stop_date)]
+    tweet_data = tweet_data.map_partitions(filter_dates)
+    tweet_data = tweet_data.persist()
+    progress(tweet_data)
+    print("Filtered tweets by date range.")
+
+    #print()
+    #print("Saving filtered tweet data.")
+    #tweet_data.to_csv(os.path.join(WORKING_DIR, 'intermediaries', 'date_filtered_tweets_june_to_election_*.csv'))
+    #tweet_data = dask_str_col_to_int(tweet_data, ['id', 'auth_id'])
+
+    # drop dupes
+    #tweet_data = tweet_data.drop_duplicates().persist(retries=100)
 
 
-        filter_dates = lambda df: df[(df['timestamp'] > start_date)&(df['timestamp'] < stop_date)]
-        tweet_data = tweet_data.map_partitions(filter_dates)
-        tweet_data = tweet_data.persist()
-        progress(tweet_data)
-        print("Filtered tweets by date range.")
-
-        print()
-        print("Saving filtered tweet data.")
-        tweet_data.to_csv(os.path.join(WORKING_DIR, 'intermediaries', 'date_filtered_tweets_june_to_election_*.csv'))
-        #tweet_data = dask_str_col_to_int(tweet_data, ['id', 'auth_id'])
-
-    tweet_data = tweet_data.persist(retries=100)
-    progress(tweet_data); print("loaded tweets!")
+    #tweet_data = tweet_data.persist(retries=100)
+    #progress(tweet_data); print("loaded tweets!")
 
     # get the number of partitions in the dataframe
-    #n_partitions = tweet_data.npartitions
-    #print("num partitions", n_partitions)
-    #tweet_data = tweet_data.compute()
-    #print("We have {} tweets before removing duplicates".format(len(tweet_data)))
-    #tweet_data = tweet_data.drop_duplicates()
-    #print("We have {} tweets after removing duplicates".format(len(tweet_data)))
-    #tweet_data = dd.from_pandas(tweet_data, npartitions=n_partitions)
+    n_partitions = tweet_data.npartitions
+    print("num partitions", n_partitions)
+    tweet_data = tweet_data.compute()
+    print("We have {} tweets before removing duplicates".format(len(tweet_data)))
+    tweet_data = tweet_data.drop_duplicates(subset=['id'])
+    print("We have {} tweets after removing duplicates".format(len(tweet_data)))
+    tweet_data = dd.from_pandas(tweet_data, npartitions=n_partitions).persist(retries=1000)
     #tweet_data = tweet_data.drop_duplicates().persist(retries=1000)
-    #progress(tweet_data); print("Dropped duplicates")
-    tweet_data = tweet_data.set_index('id')
-    tweet_data = tweet_data.persist(retries=1000)
-    #progress(tweet_data)
+    progress(tweet_data); print("Dropped duplicates")
+    tweet_data = tweet_data.set_index('id').persist(retries=100)
+    progress(tweet_data)
     #tweet_data.to_csv(os.path.join(WORKING_DIR, 'intermediaries', 'tweets_less_duplicates_new_file_*.csv'))
 
     print("Finished loading tweets!")
     return tweet_data
 
 
+def gather_retweet_edges_v2(tweet_dir, retweet_dir):
+    """
+    This method does the job of load tweets and correlate but for our newly corrected data, whose format
+    has been slightly altered
+    :return:
+    """
+
+    # load tweets
+    #tweet_data = dd.read_csv(os.path.join(tweet_dir, '*.csv'), delimiter=',', usecols=['tweet_id', 'created_at'],
+    #                         dtype={'tweet_id': str, 'created_at': str}
+    #                         ).rename(columns={'tweet_id': 'id',  'created_at': 'timestamp'})
+    tweet_data = dd.read_csv(os.path.join(tweet_dir, '*.csv'), delimiter=',', usecols=['id', 'p', 'timestamp'],
+                             dtype={'id': np.int64, 'p': np.float64, 'timestamp': str})
+
+    #tweet_data = tweet_data[tweet_data['id'] != 'id']
+    tweet_data['timestamp'] = dd.to_datetime(tweet_data['timestamp'], format='%Y-%m-%d %H:%M:%S')
+
+    filter_dates = lambda df: df[(df['timestamp'] > start_date) & (df['timestamp'] < stop_date)]
+    tweet_data = tweet_data.map_partitions(filter_dates)
+    tweet_data = tweet_data.persist()
+    progress(tweet_data); print("Tweets: Filtered tweets on datetime")
+    # convert id to int and set as index
+    #tweet_data = dask_str_col_to_int(tweet_data, 'id').persist(retries=100)
+    #progress(tweet_data); print("Tweets: Convert id to int")
+
+    # remove duplicates
+    partitions = tweet_data.npartitions
+    tweet_data = tweet_data.drop_duplicates(subset='id').repartition(npartitions=partitions).persist(retries=100)
+    progress(tweet_data); print("Tweets: Dropped duplicates")
+
+    # set index
+    tweet_data = tweet_data.set_index('id').persist(retries=100)
+    progress(tweet_data); print("Tweets: Set index to id")
+
+
+    # load retweets
+    retweet_data = dd.read_csv(os.path.join(retweet_dir, '*.csv'), delimiter=',', usecols=['tweet_id', 'auth_id', 'infl_id'],
+                             dtype={'tweet_id': str, 'auth_id': str, 'infl_id': str}
+                             ).rename(columns={'tweet_id': 'id', 'user_id': 'auth_id'})
+    # convert string columns to int
+    retweet_data = dask_str_col_to_int(retweet_data, 'id').persist(retries=100)
+    progress(retweet_data); print("Retweets: Converted id to int")
+
+    # remove duplicates
+    partitions = retweet_data.npartitions
+    retweet_data = retweet_data.drop_duplicates(subset='id').repartition(npartitions=partitions).persist(retries=100)
+    progress(retweet_data); print("Retweets: Dropped duplicates")
+
+    # set index
+    retweet_data = retweet_data.set_index('id').persist(retries=100)
+    progress(retweet_data); print("Retweets: Set index to id")
+
+
+
+    # join the data
+    print("Merging tweets to retweets")
+    intermediaries = retweet_data.merge(tweet_data, left_index=True, right_index=True).persist(retries=100)
+    progress(intermediaries); print("Merged tweets and retweets")
+
+
+    print("Writing Filtered Retweet intermediaries")
+    write_dir = os.path.join(WORKING_DIR, 'stance_merged_retweets')
+    intermediaries.to_csv(os.path.join(write_dir, 'merged_retweets_alldata_*.csv'))
+
+    return
+
+
 def drop_duplicate_rows(files):
     """
     Given a list of files, remov
-    :param files: 
+    :param files:
     :return:
     """
     for dir_path, file in files:
@@ -147,7 +213,8 @@ def drop_duplicate_rows(files):
 
 
 def correlate(directory, remove_duplicates=True):
-    tweets = dask_load_tweets(Election_2020_dir)
+    #tweets = dask_load_tweets(os.path.join(Election_2020_dir, 'tweets'))
+    tweets = dask_load_tweets(os.path.join(WORKING_DIR, 'stance_merged_tweets'))
     basename = os.path.basename(os.path.normpath(directory))
     print("Reading from {}".format(directory))
     stime = time.time()
@@ -171,14 +238,20 @@ def correlate(directory, remove_duplicates=True):
 
     if remove_duplicates:
         print("Removing duplicates")
+        #print("Length of retweets before: {}".format(len(data)))
+        #data = data.drop_duplicates().persist(retries=100)
+        #progress(data); print("Finished dropping dupes")
+        #print("Length of retweets after: {}".format(len(data)))
         pd_data = data.compute()
         pre_drop = len(pd_data)
-        pd_data = pd_data.drop_duplicates()
-        post_drop = len(pd_data)
         print("Rows before:", pre_drop)
+        pd_data = pd_data.drop_duplicates(subset=['id'])
+        post_drop = len(pd_data)
         print("Rows after:", post_drop)
         print("Dropped {} duplicate entries!".format(pre_drop-post_drop))
-        data = dd.from_pandas(pd_data, npartitions=data.npartitions)
+        print("Are there duplicates left in {} data? {}".format(basename, pd_data.duplicated().any()))
+        data = dd.from_pandas(pd_data, npartitions=data.npartitions).persist(retries=100)
+        progress(data)
         print("Dropped duplicates")
 
     # set our index to the id column, to make our merge with tweets faster
@@ -188,26 +261,36 @@ def correlate(directory, remove_duplicates=True):
     progress(data)
     print("load time taken {} seconds".format(time.time() - stime))
 
+    # To merge, we will concat merge for speed
+    # first get all intersecting ids
     print("Merging Tweets and {}".format(basename))
     stime = time.time()
-    data = data.merge(tweets, left_index=True, right_index=True).persist(retries=1000)
-    progress(data)
+    #tweets_in_both = data.index.intersection(tweets.index)
+    tweets_in_both = np.intersect1d(np.array(data.index), np.array(tweets.index))
+    data = data.loc[tweets_in_both]
+    tweets = tweets.loc[tweets_in_both]
+    tweets['infl_id'] = data['infl_id']
+
+    #data = data.merge(tweets, left_index=True, right_index=True).persist(retries=1000)
+    #progress(data)
     print("Merge time taken {} seconds".format(time.time() - stime))
 
     # remove any columns we don't need for our datetime edges
     print("Remove extra columns")
     stime = time.time()
-    out_columns = ['id', 'infl_id', 'timestamp', 'auth_id']
-    data = data.drop([x for x in data.columns if x not in out_columns], axis=1)
-    # progress(data)
-    data.to_csv(os.path.join(WORKING_DIR, 'intermediaries', 'merged_tweet_to_{}_*.csv'.format(basename)))
+    out_columns = ['id', 'infl_id', 'timestamp', 'auth_id', 'p']
+    tweets = tweets.drop([x for x in data.columns if x not in out_columns], axis=1).persist(retries=100)
+    tweets = progress(tweets)
+
+    #data.to_csv(os.path.join(WORKING_DIR, 'intermediaries', 'merged_tweet_to_{}_*.csv'.format(basename)))
+    tweets.to_csv(os.path.join(WORKING_DIR, 'test', 'merged_tweet_to_{}_*.csv'.format(basename)))
     print("Read and write of {} took {} seconds".format(directory, time.time() - stime))
 
     return
 
 
 def dask_filter_stance():
-    stance_dir = os.path.join(Election_2020_dir, 'classification')
+    stance_dir = os.path.join('/home/pub/hernan/Election_2020/joined_output/classification')
     stime = time.time()
     stances_data = dd.read_csv(os.path.join(stance_dir, '*v2.txt'), delimiter=',',
                                header=None, usecols=[0, 1, 3], dtype={0: np.int64, 1: str, 3: str},
@@ -278,6 +361,24 @@ def dask_assign_stance(tweets):
         #right.to_csv(os.path.join(WORKING_DIR, 'right_edges.csv'), single_file=True)
 
     return tweets
+
+
+def write_stance_edgelists(intermediaries_path):
+    print("Writing stance edgelist, using intermediaries from", intermediaries_path)
+    stances_data = dd.read_csv(os.path.join(intermediaries_path, '*.csv'), delimiter=',',
+                               dtype={'id': np.int64, 'timestamp': str, 'user_id': np.int64,
+                                      'p': np.float64, 'infl_id': np.int64}).set_index('id').persist(retries=100)
+    progress(stances_data); print("Finished loading stance intermediaries")
+    stances_left = stances_data[stances_data['p'] < .33].drop(['timestamp', 'p'], axis=1).persist(retries=100)
+    progress(stances_left); print("Finshed Left separation")
+    stances_right = stances_data[stances_data['p'] > .66].drop(['timestamp', 'p'], axis=1).persist(retries=100)
+    progress(stances_right); print("Finshed Right separation")
+
+    # write edgelists
+    stances_left.to_csv(os.path.join(WORKING_DIR, 'url_classified_edgelists', 'pro_biden_retweet_edges.csv'), single_file=True)
+    stances_right.to_csv(os.path.join(WORKING_DIR, 'url_classified_edgelists', 'pro_trump_retweet_edges.csv'), single_file=True)
+    print("Finished writing stance edgelists!")
+    return
 
 
 def dask_str_col_to_int(data, col):
@@ -391,14 +492,19 @@ def apply_tweet_leanings(tweets, tweet_leaning_filters=None):
     return tweet_leanings
 
 
-def assign_edge_classes(tweets, filter_biden_trump, name='', write=True):
+def assign_edge_classes(tweets, name='', write=True):
     print("Begin assigning edge classes")
+    bias_to_filename = {'Center news': 'center', 'Fake news': 'fake', 'Extreme bias right': 'right_extreme',
+                        'Extreme bias left': 'left_extreme', 'Left leaning news': 'left_leaning',
+                        'Right leaning news': 'right_leaning', 'Left news': 'left', 'Right news': 'right'}
     stime_total = time.time()
-    write_dir = '/home/crossb/working/'#url_classified_edgelists'
+    #write_dir = '/home/crossb/working/url_classified_edgelists'
+    write_dir = '/home/crossb/working/url_classified_edgelists/retweet_edges_fixed_missing_01302020'
 
     # read the tweet classes
     #leanings_path = os.path.join(WORKING_DIR, 'intermediaries', 'tweet_classes.csv')
-    leanings_path = '/home/pub/hernan/Election_2020/classified_tweets.csv'
+    #leanings_path = '/home/pub/hernan/Election_2020/classified_tweets.csv'
+    leanings_path = '/home/pub/hernan/Election_2020/classified_data_with_double_links_v2.csv'
     urls_data = dd.read_csv(leanings_path, delimiter=',',
                             usecols=['tweet_id', 'bias'],#usecols=['id', 'leaning'],
                             dtype={'tweet_id': np.int64, 'bias': str}
@@ -414,25 +520,16 @@ def assign_edge_classes(tweets, filter_biden_trump, name='', write=True):
         progress(class_data)
         print("Split urls by leaning")
         # merge
-        pdb.set_trace()
         class_data = tweets.merge(class_data, left_index=True, right_index=True).persist(retries=1000)
         progress(class_data)
 
-        # filter out biden / trump from right leaning networks and left leaning networks respectively
-        left_leanings = ['Left leaning news', 'Extreme bias left', 'Left news']
-        right_leanings = ['Right leaning news', 'Extreme bias right', 'Right news']
-        #if filter_biden_trump and edge_class in left_leanings:
-        #    print("Filtering out Trump")
-        #    class_data = class_data[class_data['auth_id'] != 25073877]
-        #elif filter_biden_trump and edge_class in right_leanings:
-        #    print("Filtering out Biden")
-        #    class_data = class_data[class_data['auth_id'] != 939091]
-
         if write:
             print("Merged Tweets to urls")
-            class_data = class_data.drop(['timestamp', 'leaning'], axis=1)
+            drop_cols = ['timestamp', 'leaning']#, 'p']
+            class_data = class_data.drop(drop_cols, axis=1)
 
-            class_data.to_csv(os.path.join(write_dir, '{}_{}_edges.csv'.format(edge_class, name)),
+            print("Writing edgelist to {}".format(write_dir))
+            class_data.to_csv(os.path.join(write_dir, '{}_{}_edges.csv'.format(bias_to_filename[edge_class], name)),
                               single_file=True)
             #class_data.to_csv(os.path.join(write_dir, '{}_edges.csv'.format(edge_class)), single_file=True, index=False)
             print("{} edgelist elapsed time {} seconds".format(edge_class, time.time() - stime))
@@ -624,41 +721,162 @@ def add_vertex_properties(G):
 
 
 def DEBUG():
+    import glob
 
-    path = os.path.join(WORKING_DIR, 'url_classified_edgelists', 'Left leaning news_edges_less_trump.csv')
-    edges = dd.read_csv(path, delimiter=',',
-                        usecols=['id', 'auth_id', 'infl_id'],
-                        dtype={'id': np.int64, 'auth_id': np.int64, 'infl_id': np.int64}
-                        )
+    # load tweet_ids from tweets, retweets, and classifications
+    #glob_0_9 = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'tweets', '20200[6-9]*.csv'))
+    #glob_tens = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'tweets', '2020[1][0-1]*.csv'))
+    tweets_path = os.path.join(Election_2020_dir, 'tweets', '*.csv')
 
-    edges = edges.persist(retries=1000)
-    progress(edges)
-    edges = edges.compute()
-    pdb.set_trace()
+    glob_0_9 = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'retweets', '20200[6-9]*.csv'))
+    glob_tens = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'retweets', '2020[1][0-1]*.csv'))
+    retweets_path = glob_0_9 + glob_tens#os.path.join(Election_2020_dir, 'retweets', '*.csv')
+
+    classifications_path = os.path.join("/home/pub/hernan/Election_2020/classified_data_with_double_links_v2.csv")
+
+    glob_0_9 = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'quotes', '20200[6-9]*.csv'))
+    glob_tens = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'quotes', '2020[1][0-1]*.csv'))
+    quotes_path = glob_0_9 + glob_tens#os.path.join(Election_2020_dir, 'quotes', '*.csv')
+
+    glob_0_9 = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'replies', '20200[6-9]*.csv'))
+    glob_tens = glob.glob(os.path.join('/home/pub/hernan/Election_2020/joined_output', 'replies', '2020[1][0-1]*.csv'))
+    replies_path = glob_0_9 + glob_tens#os.path.join(Election_2020_dir, 'replies', '*.csv')
+    #mentions_path = os.path.join(Election_2020_dir, 'user_mentions', '*.csv')
+    #classifications_path = os.path.join("/home/pub/hernan/Election_2020/classified_tweets.csv")
+
+    tweets = dd.read_csv(tweets_path, delimiter=',', usecols=['tweet_id', 'created_at'],
+                         dtype={'tweet_id': str, 'created_at': str}).rename(columns={'tweet_id': 'id'})
+    tweets = dask_str_col_to_int(tweets, 'id').persist(retries=100)
+    tweets = tweets.dropna()
+    tweets['id'] = tweets['id'].astype(np.int64)
+    tweets['created_at'] = dd.to_datetime(tweets['created_at'], format='%Y-%m-%d %H:%M:%S')
+    filter_dates = lambda df: df[(df['created_at'] > start_date)]# & (df['created_at'] < stop_date)]
+    tweets = tweets.map_partitions(filter_dates)
+    tweets = tweets.persist()
+    progress(tweets);
+    print("Tweets: Filtered tweets on datetime")
+
+
+    #retweets = dd.read_csv(retweets_path, delimiter=',', usecols=['id'], dtype={'id': str})
+    #retweets = dask_str_col_to_int(retweets, 'id').persist(retries=100)
+    #progress(retweets); print('Loaded retweets')
+#
+    #quotes = dd.read_csv(quotes_path, delimiter=',', usecols=['id'], dtype={'id': str})
+    #quotes = dask_str_col_to_int(quotes, 'id').persist(retries=100)
+    #progress(quotes); print('Loaded quotes')
+#
+    #replies = dd.read_csv(replies_path, delimiter=',', usecols=['id'], dtype={'id': str})
+    #replies = dask_str_col_to_int(replies, 'id').persist(retries=100)
+    #progress(replies); print('Loaded replies')
+#
+    #user_mentions = dd.read_csv(mentions_path, delimiter=',', usecols=['tweet_id'], dtype={'tweet_id': str}).rename(columns={'tweet_id': 'id'})
+    #user_mentions = dask_str_col_to_int(user_mentions, 'id').persist(retries=100)
+    #progress(user_mentions); print('Loaded user_mentions')
+
+    classifications = dd.read_csv(classifications_path, delimiter=',', usecols=['tweet_id'],
+                                  dtype={'tweet_id': str}).rename(columns={'tweet_id': 'id'})
+    classifications = dask_str_col_to_int(classifications, 'id').persist(retries=100)
+    progress(classifications); print('Loaded classifications')
+
+    tweets = tweets.compute()
+    print("Earliest Datetime is {}".format(tweets.created_at.min()))
+    print("Latest Datetime is {}".format(tweets.created_at.max()))
+    if True:
+        return
+    #retweets = retweets.compute()
+    #quotes = quotes.compute()
+    #replies = replies.compute()
+    #user_mentions = user_mentions.compute()
+    classifications = classifications.compute()
+
+    unique_tweets = set(tweets.id.unique())#np.array(tweets.id.unique())
+    #unique_retweets = set(retweets.id.unique())
+    #unique_quotes = set(quotes.id.unique())
+    #unique_replies = set(replies.id.unique())
+    #unique_user_mentions = np.array(user_mentions.id.unique())
+    #unique_retweet_ids = np.array(retweets.retweet_id.unique())
+    unique_classifications = set(classifications.id.unique())#np.array(classifications.id.unique())
+
+    print("Unique tweet ids:", len(unique_tweets))
+    #print("Unique retweet ids:", len(unique_retweets))
+    #print("Unique quotes ids:", len(unique_quotes))
+    #print("Unique replies ids:", len(unique_replies))
+    #print("Unique user mentions ids:", len(unique_user_mentions))
+    print("Unique tweet id classifications:", len(unique_classifications))
+
+
+    same_tweets_classifications = unique_classifications.intersection(unique_tweets)#np.intersect1d(unique_tweets, unique_classifications)
+    print("Tweets.id intersection Classifications.tweet_id", len(same_tweets_classifications))
+
+    difference = unique_classifications.difference(unique_tweets)
+    #df = pd.DataFrame()
+    #df['missing_tweet_id'] = np.array(list(difference))
+    #pdb.set_trace()
+    #df.to_csv('missing_tweet_ids.csv', index=False)
+    same_tweets_retweets = unique_retweets.intersection(unique_tweets)
+    print("Tweets.id intersection Retweets.id", len(same_tweets_retweets))
+    #same_tweet_id_retweet_ids = np.intersect1d(unique_tweets, unique_retweet_ids)
+    #print("Tweets.id intersection Retweets.retweet_id", len(same_tweet_id_retweet_ids))
+    same_retweets_classifications = unique_classifications.intersection(unique_retweets)
+    print("Retweets.id intersection Classifications.tweet_id", len(same_retweets_classifications))
+
+    same_quotes_classifications = unique_classifications.intersection(unique_quotes)
+    print("Quotes.id intersection Classifications.tweet_id", len(same_quotes_classifications))
+    same_replies_classifications = unique_classifications.intersection(unique_replies)
+    print("Replies.id intersection Classifications.tweet_id", len(same_replies_classifications))
+    #same_user_mentions_classifications = np.intersect1d(unique_user_mentions, unique_classifications)
+    #print("User Mentions.id intersection Classifications.tweet_id", len(same_user_mentions_classifications))
+
+    same_all = unique_classifications.intersection(same_tweets_retweets)
+    print("Tweets.id.intersect(retweets.id).intersect(classifications.tweet_id)", len(same_all))
+
+
+    #path = os.path.join(WORKING_DIR, 'url_classified_edgelists', 'Left leaning news_edges_less_trump.csv')
+    #edges = dd.read_csv(path, delimiter=',',
+    #                    usecols=['id', 'auth_id', 'infl_id'],
+    #                    dtype={'id': np.int64, 'auth_id': np.int64, 'infl_id': np.int64}
+    #                    )
+#
+    #edges = edges.persist(retries=1000)
+    #progress(edges)
+    #edges = edges.compute()
+    #pdb.set_trace()
 
     return
 
 
 def merge_tweets_and_stances():
-
     stance_data = dask_filter_stance()
     print("Compute stance data")
     stime = time.time()
-    stance_data = stance_data.compute()
+    #stance_data = stance_data.compute()
+    stance_data = stance_data.repartition(npartitions=150).persist(retries=100)
+    progress(stance_data)
     print("Computation took: {} seconds".format(time.time() - stime))
+    #stime = time.time()
+    #stance_data = stance_data.set_index(['auth_id', 'timestamp'])
+    #print("Multi-Index time taken: {}".format(time.time() - stime))
     tweet_dir = os.path.join(Election_2020_dir, 'tweets')
     tweet_files = [f for f in os.listdir(tweet_dir) if os.path.isfile(os.path.join(tweet_dir, f))]
     # for each tweet file
     for file in tweet_files:
         ftime = time.time()
         print("Starting {}".format(file))
-        tweet_data = dd.read_csv(os.path.join(tweet_dir, file), sep=',', usecols=['id', 'created_at', 'user_id'],
-                                 dtype={'id': str, 'created_at': str, 'user_id': str}
-                                 ).rename(columns={'created_at': 'timestamp', 'user_id': 'auth_id'})
+        tweet_data = dd.read_csv(os.path.join(tweet_dir, file), sep=',', usecols=['tweet_id', 'created_at', 'user_id'],
+                                 dtype={'tweet_id': str, 'created_at': str, 'user_id': str}
+                                 ).rename(columns={'tweet_id': 'id', 'created_at': 'timestamp', 'user_id': 'auth_id'})
 
         tweet_data = tweet_data[tweet_data['id'] != 'id']  # %H:%M:%S')
         tweet_data = dask_str_col_to_int(tweet_data, 'auth_id')
         tweet_data = dask_str_col_to_int(tweet_data, 'id')
+
+        # remove duplicates
+
+        tweet_data = tweet_data.drop_duplicates(subset='id').persist(retries=100)
+        progress(tweet_data)
+        print("Tweets: Dropped duplicates")
+        tweet_data = tweet_data.repartition(npartitions=150).persist(retries=100)
+
         full_timestamp = tweet_data[['id', 'timestamp']].set_index('id')
         to_date = lambda df: df['timestamp'].str.slice(stop=10)
         tweet_data['timestamp'] = tweet_data.map_partitions(to_date)
@@ -666,17 +884,30 @@ def merge_tweets_and_stances():
 
         tweet_data = tweet_data.persist(retries=100)
         progress(tweet_data)
-        tweet_data = tweet_data.compute()
-        full_timestamp = full_timestamp.compute()
+        full_timestamp = full_timestamp.persist(retries=100)
+        progress(full_timestamp)
+        #tweet_data = tweet_data.compute()
+        #tweet_data = tweet_data.set_index(['auth_id', 'timestamp'])
+        #full_timestamp = full_timestamp.compute()
         print("Tweets loaded and formatted")
-        out_data = tweet_data.merge(stance_data, on=['auth_id', 'timestamp'], how='left').set_index('id').persist(retries=1000)
+        #out_data = tweet_data.merge(stance_data, left_index=True, right_index=True, how='left').set_index('id')
+        tweet_data = tweet_data.merge(stance_data, on=['auth_id', 'timestamp'], how='left').persist(retries=100)
         progress(tweet_data)
+        print("Merged tweets and stance")
+        tweet_data = tweet_data.set_index('id').persist(retries=100)
+        #.set_index('id')#.persist(retries=1000)
+        progress(tweet_data)
+        print("Set index")
+        tweet_data = tweet_data.drop(['timestamp'], axis=1)
 
-        out_data = out_data.drop(['timestamp'], axis=1)
-        out_data['timestamp'] = full_timestamp
+        tweet_data = tweet_data.merge(full_timestamp, left_index=True, right_index=True).persist(retries=100)
+        progress(tweet_data)
+        print("Dropped ")
+        #tweet_data['timestamp'] = full_timestamp
 
         print("Tweets and stances merged")
-        out_data.to_csv(os.path.join(WORKING_DIR, 'corrected_stance_{}'.format(file)), single_file=True)
+        tweet_data.to_csv(os.path.join(WORKING_DIR, 'stance_merged_tweets', 'corrected_stance_{}'.format(file)),
+                          single_file=True)
         print("Time taken:", time.time() - ftime)
 
     return
@@ -741,9 +972,21 @@ def fix_tweet_stance_timestamps():
     return
 
 
+def load_retweet_intermediaries():
+    path = os.path.join(WORKING_DIR, 'intermediaries', 'retweets')#'test')
+    print("Loading intermediaries from {}".format(path))
+    data = dd.read_csv(os.path.join(path, '*.csv'), delimiter=',',
+                               dtype={'id': np.int64, 'timestamp': str, 'auth_id': np.int64,
+                                      #'user_id': np.int64,
+                                      #'p': np.float64,
+                                      'infl_id': np.int64}).set_index('id').persist(retries=100)
+    progress(data); print("Finished loading stance intermediaries")
+    return data
+
+
 def gather_edges():
     print("Begin gathering edge data")
-    #dask_load_tweets(Election_2020_dir)
+    #dask_load_tweets(os.path.join(Election_2020_dir, 'tweets'))
     # Step 1: Process/Load our twitter data and correlate that data to our twitter responses
     #for dir in [os.path.join(Election_2020_dir, 'retweets'),
     #            os.path.join(Election_2020_dir, 'replies'),
@@ -752,6 +995,9 @@ def gather_edges():
     # user mentions is formatted without a corresponding response retweet/reply, etc. id, so we will process
     # differently
     #correlate(os.path.join(Election_2020_dir, 'user_mentions'), remove_duplicates=False)
+
+    #retweet network
+    #correlate(os.path.join(Election_2020_dir, 'retweets'), remove_duplicates=True)
 
     # Step 2: Concatenate all the edges from step 1 into one edgelist
     #edges = concat_edges(type='retweet')
@@ -763,7 +1009,11 @@ def gather_edges():
     # step 4: Classify edges by political leaning
     ## URLS ##
     #tweet_to_class()
-    #assign_edge_classes(edges, filter_biden_trump=False, name='retweet')
+
+
+    # HERE BE THE PLACE TO REGENERATE =======================================================
+    #edges = load_retweet_intermediaries()
+    #assign_edge_classes(edges, name='retweet')
 
     #trump_biden_deficient_networks()
     ## STANCES ##
@@ -772,9 +1022,11 @@ def gather_edges():
 
     #polarization_filter()
 
-    #DEBUG()
+    DEBUG()
     #merge_tweets_and_stances()
-    fix_tweet_stance_timestamps()
+    #fix_tweet_stance_timestamps()
+    #gather_retweet_edges_v2(os.path.join(WORKING_DIR, 'stance_merged_tweets'), os.path.join(Election_2020_dir, 'retweets'))
+    #write_stance_edgelists(os.path.join(WORKING_DIR, 'stance_merged_retweets'))
 
     # load our
     edges_array = []
@@ -951,7 +1203,7 @@ def correlate_pandas():
 
 def main():
     cluster = LocalCluster(n_workers=NUM_WORKERS, threads_per_worker=1,
-                           scheduler_port=0, dashboard_address=None)
+                           scheduler_port=0, dashboard_address=None, memory_limit='256GB')
     client = Client(cluster)
     print("Starting Retweet Network Generation")
     outer_stime = time.time()
